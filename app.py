@@ -52,7 +52,7 @@ def get_historical_depths(token_symbol):
     cur = conn.cursor()
     seven_days_ago = datetime.now() - timedelta(days=7)
     cur.execute(
-        "SELECT timestamp, buy_depth, sell_depth FROM depths WHERE token = %s AND timestamp >= %s ORDER BY timestamp ASC",
+        "SELECT timestamp, buy_depth, sell_depth FROM depths WHERE token = %s AND timestamp >= %s AND buy_depth > 0 AND sell_depth > 0 ORDER BY timestamp ASC",
         (token_symbol, seven_days_ago)
     )
     results = cur.fetchall()
@@ -63,6 +63,15 @@ def get_historical_depths(token_symbol):
         df.set_index('Timestamp', inplace=True)
         return df
     return None
+
+def format_currency(value):
+    """Format currency values in millions/thousands format like $1.11M"""
+    if value >= 1_000_000:
+        return f"${value/1_000_000:.2f}M"
+    elif value >= 1_000:
+        return f"${value/1_000:.1f}K"
+    else:
+        return f"${value:.0f}"
 
 @st.cache_data(ttl=5)
 def fetch_quote(sell_address, buy_address, sell_amount):
@@ -152,6 +161,9 @@ def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
 
 st.title("Starknet ±2% Depth Dashboard via AVNU")
 
+# Add note about USDC quotes
+st.markdown("*All quotes are executed on AVNU against USDC*")
+
 with st.spinner("Fetching market depth data..."):
     data = []
     for token in TOKENS:
@@ -168,33 +180,43 @@ with st.spinner("Fetching market depth data..."):
                 sell_depth_raw = find_depth_amount(token, USD_TOKEN, True, token['symbol'])
                 sell_depth = sell_depth_raw / 10 ** USD_TOKEN['decimals'] if sell_depth_raw else 0.0
                 print(f"Token: {token['symbol']}, Buy depth: {buy_depth}, Sell depth: {sell_depth}")
-                insert_depths(token['symbol'], buy_depth, sell_depth)
+                
+                # Only insert if both depths are greater than 0
+                if buy_depth > 0 and sell_depth > 0:
+                    insert_depths(token['symbol'], buy_depth, sell_depth)
 
-            data.append({
-                'Token': token['symbol'],
-                'Buy Depth (USD)': f"{buy_depth:,.2f}",
-                'Sell Depth (USD)': f"{sell_depth:,.2f}",
-            })
-
-            # History graph
-            hist_df = get_historical_depths(token['symbol'])
-            if hist_df is not None and not hist_df.empty:
-                st.subheader(f"{token['symbol']} Depth History (Last 7 Days)")
-                st.line_chart(hist_df)
-            else:
-                st.info(f"No historical data yet for {token['symbol']}. It will build over time.")
+            # Only add to data if both depths are greater than 0
+            if buy_depth > 0 and sell_depth > 0:
+                data.append({
+                    'Token': token['symbol'],
+                    'Buy Depth (USD)': format_currency(buy_depth),
+                    'Sell Depth (USD)': format_currency(sell_depth),
+                })
         except Exception as e:
             st.error(f"Error for {token['symbol']}: {e}")
             print(f"Error for {token['symbol']}: {e}")
-            data.append({
-                'Token': token['symbol'],
-                'Buy Depth (USD)': "0.00",
-                'Sell Depth (USD)': "0.00",
-            })
 
-    df = pd.DataFrame(data)
+    # Display table at the top with title
+    if data:
+        st.subheader("Latest Depths")
+        df = pd.DataFrame(data)
+        st.dataframe(df, use_container_width=True)
 
-st.dataframe(df, use_container_width=True)
+    # Display historical charts
+    for token in TOKENS:
+        hist_df = get_historical_depths(token['symbol'])
+        if hist_df is not None and not hist_df.empty:
+            st.subheader(f"{token['symbol']} ±2% Depth History (Last 7 Days)")
+            
+            # Create chart with proper formatting and colors
+            chart_data = hist_df.copy()
+            
+            # Format the chart to show proper Y-axis formatting and colors
+            chart = st.line_chart(
+                chart_data,
+                color=["#00ff00", "#ff0000"],  # Green for buy, red for sell
+                height=300  # Reduce height by roughly half from default
+            )
 
 time.sleep(60)
 st.rerun()
