@@ -6,6 +6,7 @@ import pandas as pd
 import psycopg2
 from datetime import datetime, timedelta
 import os
+import altair as alt
 
 TOKENS = [
     {'symbol': 'ETH', 'address': '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7', 'decimals': 18},
@@ -60,6 +61,7 @@ def get_historical_depths(token_symbol):
     conn.close()
     if results:
         df = pd.DataFrame(results, columns=['Timestamp', 'Buy Depth (USD)', 'Sell Depth (USD)'])
+        df = df[(df['Buy Depth (USD)'] > 0) & (df['Sell Depth (USD)'] > 0)]
         df.set_index('Timestamp', inplace=True)
         return df
     return None
@@ -151,6 +153,9 @@ def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
     return None
 
 st.title("Starknet ±2% Depth Dashboard via AVNU")
+st.markdown("Note: Quotes are made on AVNU against USDC")
+
+st.subheader("Latest depths")
 
 with st.spinner("Fetching market depth data..."):
     data = []
@@ -167,34 +172,41 @@ with st.spinner("Fetching market depth data..."):
                 buy_depth = buy_depth_raw / 10 ** USD_TOKEN['decimals'] if buy_depth_raw else 0.0
                 sell_depth_raw = find_depth_amount(token, USD_TOKEN, True, token['symbol'])
                 sell_depth = sell_depth_raw / 10 ** USD_TOKEN['decimals'] if sell_depth_raw else 0.0
-                print(f"Token: {token['symbol']}, Buy depth: {buy_depth}, Sell depth: {sell_depth}")
-                insert_depths(token['symbol'], buy_depth, sell_depth)
+                if buy_depth > 0 or sell_depth > 0:
+                    print(f"Token: {token['symbol']}, Buy depth: {buy_depth}, Sell depth: {sell_depth}")
+                    insert_depths(token['symbol'], buy_depth, sell_depth)
 
             data.append({
                 'Token': token['symbol'],
-                'Buy Depth (USD)': f"{buy_depth:,.2f}",
-                'Sell Depth (USD)': f"{sell_depth:,.2f}",
+                'Buy Depth (USD)': f"${buy_depth:,.2f}",
+                'Sell Depth (USD)': f"${sell_depth:,.2f}",
             })
-
-            # History graph
-            hist_df = get_historical_depths(token['symbol'])
-            if hist_df is not None and not hist_df.empty:
-                st.subheader(f"{token['symbol']} Depth History (Last 7 Days)")
-                st.line_chart(hist_df)
-            else:
-                st.info(f"No historical data yet for {token['symbol']}. It will build over time.")
         except Exception as e:
             st.error(f"Error for {token['symbol']}: {e}")
             print(f"Error for {token['symbol']}: {e}")
             data.append({
                 'Token': token['symbol'],
-                'Buy Depth (USD)': "0.00",
-                'Sell Depth (USD)': "0.00",
+                'Buy Depth (USD)': "$0.00",
+                'Sell Depth (USD)': "$0.00",
             })
 
     df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True)
 
-st.dataframe(df, use_container_width=True)
+# Display historical graphs after the table
+for token in TOKENS:
+    hist_df = get_historical_depths(token['symbol'])
+    if hist_df is not None and not hist_df.empty:
+        st.subheader(f"{token['symbol']} ±2% Depth History (Last 7 Days)")
+        df_melt = pd.melt(hist_df.reset_index(), id_vars=['Timestamp'], value_vars=['Buy Depth (USD)', 'Sell Depth (USD)'])
+        chart = alt.Chart(df_melt).mark_line().encode(
+            x='Timestamp:T',
+            y=alt.Y('value:Q', axis=alt.Axis(format='$~s')),
+            color=alt.Color('variable:N', scale=alt.Scale(domain=['Buy Depth (USD)', 'Sell Depth (USD)'], range=['green', 'red']))
+        ).properties(height=300)
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info(f"No historical data yet for {token['symbol']}. It will build over time.")
 
 time.sleep(60)
 st.rerun()
