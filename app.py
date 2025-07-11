@@ -6,6 +6,7 @@ import pandas as pd
 import psycopg2
 from datetime import datetime, timedelta
 import os
+import altair as alt
 
 TOKENS = [
     {'symbol': 'ETH', 'address': '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7', 'decimals': 18},
@@ -60,6 +61,9 @@ def get_historical_depths(token_symbol):
     conn.close()
     if results:
         df = pd.DataFrame(results, columns=['Timestamp', 'Buy Depth (USD)', 'Sell Depth (USD)'])
+        # Ensure proper decimal precision
+        df['Buy Depth (USD)'] = pd.to_numeric(df['Buy Depth (USD)'], errors='coerce')
+        df['Sell Depth (USD)'] = pd.to_numeric(df['Sell Depth (USD)'], errors='coerce')
         df.set_index('Timestamp', inplace=True)
         return df
     return None
@@ -208,15 +212,39 @@ with st.spinner("Fetching market depth data..."):
         if hist_df is not None and not hist_df.empty:
             st.subheader(f"{token['symbol']} ±2% Depth History (Last 7 Days)")
             
-            # Create chart with proper formatting and colors
-            chart_data = hist_df.copy()
-            
-            # Format the chart to show proper Y-axis formatting and colors
-            chart = st.line_chart(
-                chart_data,
-                color=["#00ff00", "#ff0000"],  # Green for buy, red for sell
-                height=300  # Reduce height by roughly half from default
+            # Prepare data for altair chart
+            chart_data = hist_df.reset_index().melt(
+                id_vars=['Timestamp'],
+                value_vars=['Buy Depth (USD)', 'Sell Depth (USD)'],
+                var_name='Depth Type',
+                value_name='Value'
             )
+            
+            # Create altair chart with proper formatting
+            chart = alt.Chart(chart_data).mark_line(strokeWidth=2).add_selection(
+                alt.selection_interval()
+            ).encode(
+                x=alt.X('Timestamp:T', title='Time'),
+                y=alt.Y('Value:Q',
+                       title='Depth (USD)',
+                       axis=alt.Axis(
+                           format='$.2s',  # Format as currency with SI prefix (1.1M, 500K, etc.)
+                           labelExpr="datum.value >= 1000000 ? '$' + format(datum.value/1000000, '.1f') + 'M' : datum.value >= 1000 ? '$' + format(datum.value/1000, '.0f') + 'K' : '$' + format(datum.value, '.0f')"
+                       )),
+                color=alt.Color('Depth Type:N',
+                               scale=alt.Scale(
+                                   domain=['Buy Depth (USD)', 'Sell Depth (USD)'],
+                                   range=['#00ff00', '#ff0000']  # Green for buy, red for sell
+                               ),
+                               legend=alt.Legend(title="Depth Type"))
+            ).properties(
+                height=300,  # Reduced height
+                width='container'
+            ).resolve_scale(
+                y='independent'
+            )
+            
+            st.altair_chart(chart, use_container_width=True)
 
 time.sleep(60)
 st.rerun()
