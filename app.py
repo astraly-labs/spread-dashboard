@@ -124,10 +124,12 @@ def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
     last_data = get_latest_depths(token_symbol)
     if last_data:
         last_depth = last_data[1] if is_sell_side else last_data[0]  # sell or buy
-        if last_depth > 0:
+        if last_depth > 0 and sell_price > 0:
             last_depth_float = float(last_depth)
-            min_amount = max(min_amount, math.ceil(last_depth_float * RANGE_FACTOR_LOW))
-            max_amount = min(max_amount, math.ceil(last_depth_float * RANGE_FACTOR_HIGH))
+            # Convert USD depth to token amount
+            last_amount = last_depth_float / sell_price * 10 ** sell_token['decimals']
+            min_amount = max(min_amount, math.ceil(last_amount * RANGE_FACTOR_LOW))
+            max_amount = min(max_amount, math.ceil(last_amount * RANGE_FACTOR_HIGH))
 
     for _ in range(MAX_ITERATIONS):
         amount = (min_amount + max_amount) // 2
