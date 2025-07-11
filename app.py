@@ -9,8 +9,10 @@ import os
 
 TOKENS = [
     {'symbol': 'ETH', 'address': '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7', 'decimals': 18},
-    {'symbol': 'USDT', 'address': '0x068f5c6a61780768455de69077e07e89787839ea1af2a7e11a7f4343b8a77b5d', 'decimals': 6},
-    {'symbol': 'DAI', 'address': '0x00da114221cb83fa859dbdb4c44bee7a238e9132d30b2bd5a1ff8071a87960d8', 'decimals': 18},
+    {'symbol': 'USDT', 'address': '0x068f5c6a61780768455de69077e07e89787839bf8166decfbf92b645209c0fb8', 'decimals': 6},
+    # {'symbol': 'DAI', 'address': '0x05574eb6b8789a91466f902c380d978e472db68170ff82a5b650b95a58ddf4ad', 'decimals': 18},
+    {'symbol': 'tBTC', 'address': '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d', 'decimals': 18},
+    {'symbol': 'EKUBO', 'address': '0x075afe6402ad5a5c20dd25e10ec3b3986acaa647b77e4ae24b0cbc9a54a27a87', 'decimals': 18},
     {'symbol': 'WBTC', 'address': '0x03fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac', 'decimals': 8},
     {'symbol': 'STRK', 'address': '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d', 'decimals': 18},
 ]
@@ -62,6 +64,7 @@ def get_historical_depths(token_symbol):
         return df
     return None
 
+@st.cache_data(ttl=5)
 def fetch_quote(sell_address, buy_address, sell_amount):
     url = "https://starknet.api.avnu.fi/swap/v2/quotes"
     params = {
@@ -96,7 +99,6 @@ def compute_slippage(quote, sell_dec, buy_dec):
         return float('inf')
     return 1 - (sell_usd / buy_usd)
 
-@st.cache_data(ttl=60)
 def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
     TARGET_SLIPPAGE = 0.02
     TOLERANCE_FROM_TARGET = 0.001
@@ -106,7 +108,7 @@ def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
     RANGE_FACTOR_LOW = 0.5
     RANGE_FACTOR_HIGH = 2.0
 
-    small_amount = max(1, 10 ** (sell_token['decimals'] - 6))
+    small_amount = max(1, 10 ** (sell_token['decimals']))
     small_quote = fetch_quote(sell_token['address'], buy_token['address'], small_amount)
     if not small_quote:
         return None
@@ -123,8 +125,9 @@ def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
     if last_data:
         last_depth = last_data[1] if is_sell_side else last_data[0]  # sell or buy
         if last_depth > 0:
-            min_amount = max(min_amount, math.ceil(last_depth * RANGE_FACTOR_LOW))
-            max_amount = min(max_amount, math.ceil(last_depth * RANGE_FACTOR_HIGH))
+            last_depth_float = float(last_depth)
+            min_amount = max(min_amount, math.ceil(last_depth_float * RANGE_FACTOR_LOW))
+            max_amount = min(max_amount, math.ceil(last_depth_float * RANGE_FACTOR_HIGH))
 
     for _ in range(MAX_ITERATIONS):
         amount = (min_amount + max_amount) // 2
@@ -162,6 +165,7 @@ with st.spinner("Fetching market depth data..."):
                 buy_depth = buy_depth_raw / 10 ** USD_TOKEN['decimals'] if buy_depth_raw else 0.0
                 sell_depth_raw = find_depth_amount(token, USD_TOKEN, True, token['symbol'])
                 sell_depth = sell_depth_raw / 10 ** USD_TOKEN['decimals'] if sell_depth_raw else 0.0
+                print(f"Token: {token['symbol']}, Buy depth: {buy_depth}, Sell depth: {sell_depth}")
                 insert_depths(token['symbol'], buy_depth, sell_depth)
 
             data.append({
@@ -190,5 +194,5 @@ with st.spinner("Fetching market depth data..."):
 
 st.dataframe(df, use_container_width=True)
 
-time.sleep(30)
+time.sleep(60)
 st.rerun()
