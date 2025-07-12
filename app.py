@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -117,7 +118,7 @@ st.markdown("*All quotes are executed on AVNU against USDC. Data is updated ever
 # Display last update time
 last_update = get_last_update_time()
 if last_update:
-    time_diff = datetime.now() - last_update
+    time_diff = datetime.utcnow() - last_update
     if time_diff.total_seconds() < 300:  # Less than 5 minutes
         st.success(f"🟢 Last updated: {last_update.strftime('%Y-%m-%d %H:%M:%S')} ({int(time_diff.total_seconds())} seconds ago)")
     else:
@@ -206,4 +207,5 @@ else:
     st.warning("No current depth data available. The Lambda function may not have run yet or there might be an issue with data collection.")
 
 # Auto-refresh the page every 60 seconds
+time.sleep(60)
 st.rerun()
