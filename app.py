@@ -1,72 +1,68 @@
 import streamlit as st
-import requests
-import time
-import math
 import pandas as pd
 import psycopg2
 from datetime import datetime, timedelta
-import os
 import altair as alt
 
-TOKENS = [
-    {'symbol': 'ETH', 'address': '0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7', 'decimals': 18},
-    {'symbol': 'USDT', 'address': '0x068f5c6a61780768455de69077e07e89787839bf8166decfbf92b645209c0fb8', 'decimals': 6},
-    # {'symbol': 'DAI', 'address': '0x05574eb6b8789a91466f902c380d978e472db68170ff82a5b650b95a58ddf4ad', 'decimals': 18},
-    {'symbol': 'tBTC', 'address': '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d', 'decimals': 18},
-    {'symbol': 'EKUBO', 'address': '0x075afe6402ad5a5c20dd25e10ec3b3986acaa647b77e4ae24b0cbc9a54a27a87', 'decimals': 18},
-    {'symbol': 'WBTC', 'address': '0x03fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac', 'decimals': 8},
-    {'symbol': 'STRK', 'address': '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d', 'decimals': 18},
-]
-
-USD_TOKEN = {'symbol': 'USDC', 'address': '0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3ecf368a8', 'decimals': 6}
-
-DB_CONN_STRING = st.secrets["DB_CONN"]  # From Streamlit secrets
+# Database connection
+DB_CONN_STRING = st.secrets["DB_CONN"]
 
 def get_db_connection():
+    """Get database connection"""
     return psycopg2.connect(DB_CONN_STRING)
 
-def insert_depths(token_symbol, buy_depth, sell_depth):
+def get_latest_depths_all():
+    """Get latest depth data for all tokens"""
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO depths (token, buy_depth, sell_depth) VALUES (%s, %s, %s)",
-        (token_symbol, buy_depth, sell_depth)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def get_latest_depths(token_symbol):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT buy_depth, sell_depth, timestamp FROM depths WHERE token = %s ORDER BY timestamp DESC LIMIT 1",
-        (token_symbol,)
-    )
-    result = cur.fetchone()
-    cur.close()
-    conn.close()
-    return result  # (buy, sell, timestamp) or None
+    try:
+        # Get the most recent entry for each token
+        cur.execute("""
+            SELECT DISTINCT ON (token) token, buy_depth, sell_depth, timestamp
+            FROM depths
+            WHERE buy_depth > 0 AND sell_depth > 0
+            ORDER BY token, timestamp DESC
+        """)
+        results = cur.fetchall()
+        return results
+    except Exception as e:
+        st.error(f"Error fetching latest depths: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
 def get_historical_depths(token_symbol):
+    """Get historical depth data for a specific token (last 7 days)"""
     conn = get_db_connection()
     cur = conn.cursor()
-    seven_days_ago = datetime.now() - timedelta(days=7)
-    cur.execute(
-        "SELECT timestamp, buy_depth, sell_depth FROM depths WHERE token = %s AND timestamp >= %s AND buy_depth > 0 AND sell_depth > 0 ORDER BY timestamp ASC",
-        (token_symbol, seven_days_ago)
-    )
-    results = cur.fetchall()
-    cur.close()
-    conn.close()
-    if results:
-        df = pd.DataFrame(results, columns=['Timestamp', 'Buy Depth (USD)', 'Sell Depth (USD)'])
-        # Ensure proper decimal precision
-        df['Buy Depth (USD)'] = pd.to_numeric(df['Buy Depth (USD)'], errors='coerce')
-        df['Sell Depth (USD)'] = pd.to_numeric(df['Sell Depth (USD)'], errors='coerce')
-        df.set_index('Timestamp', inplace=True)
-        return df
-    return None
+    try:
+        seven_days_ago = datetime.now() - timedelta(days=7)
+        cur.execute("""
+            SELECT timestamp, buy_depth, sell_depth
+            FROM depths
+            WHERE token = %s
+            AND timestamp >= %s
+            AND buy_depth > 0
+            AND sell_depth > 0
+            ORDER BY timestamp ASC
+        """, (token_symbol, seven_days_ago))
+        results = cur.fetchall()
+        
+        if results:
+            df = pd.DataFrame(results, columns=['Timestamp', 'Buy Depth (USD)', 'Sell Depth (USD)'])
+            # Ensure proper decimal precision
+            df['Buy Depth (USD)'] = pd.to_numeric(df['Buy Depth (USD)'], errors='coerce')
+            df['Sell Depth (USD)'] = pd.to_numeric(df['Sell Depth (USD)'], errors='coerce')
+            df.set_index('Timestamp', inplace=True)
+            return df
+        return None
+    except Exception as e:
+        st.error(f"Error fetching historical depths for {token_symbol}: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
 
 def format_currency(value):
     """Format currency values in millions/thousands format like $1.11M"""
@@ -77,174 +73,137 @@ def format_currency(value):
     else:
         return f"${value:.0f}"
 
-@st.cache_data(ttl=5)
-def fetch_quote(sell_address, buy_address, sell_amount):
-    url = "https://starknet.api.avnu.fi/swap/v2/quotes"
-    params = {
-        'sellTokenAddress': sell_address,
-        'buyTokenAddress': buy_address,
-        'sellAmount': hex(sell_amount),
-    }
+def get_last_update_time():
+    """Get the timestamp of the most recent data update"""
+    conn = get_db_connection()
+    cur = conn.cursor()
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        if not data:
-            return None
-        quote = data[0]
-        return {
-            'sell_amount': int(quote['sellAmount'], 0),
-            'buy_amount': int(quote['buyAmount'], 0),
-            'sell_token_price_in_usd': quote['sellTokenPriceInUsd'],
-            'buy_token_price_in_usd': quote['buyTokenPriceInUsd'],
-            'gas_fees_in_usd': quote['gasFeesInUsd'] + quote['avnuFeesInUsd'],
-        }
-    except Exception:
+        cur.execute("SELECT MAX(timestamp) FROM depths")
+        result = cur.fetchone()
+        return result[0] if result and result[0] else None
+    except Exception as e:
+        st.error(f"Error fetching last update time: {e}")
         return None
+    finally:
+        cur.close()
+        conn.close()
 
-def compute_slippage(quote, sell_dec, buy_dec):
-    sell_amount = quote['sell_amount'] / 10 ** sell_dec
-    buy_amount = quote['buy_amount'] / 10 ** buy_dec
-    sell_usd = sell_amount * quote['sell_token_price_in_usd']
-    buy_usd = buy_amount * quote['buy_token_price_in_usd']
-    if buy_usd == 0:
-        return float('inf')
-    return 1 - (sell_usd / buy_usd)
+def get_available_tokens():
+    """Get list of tokens that have data in the database"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT DISTINCT token FROM depths ORDER BY token")
+        results = cur.fetchall()
+        return [row[0] for row in results]
+    except Exception as e:
+        st.error(f"Error fetching available tokens: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
 
-def find_depth_amount(sell_token, buy_token, is_sell_side, token_symbol):
-    TARGET_SLIPPAGE = 0.02
-    TOLERANCE_FROM_TARGET = 0.001
-    MAX_ITERATIONS = 20
-    MIN_AMOUNT_USD = 10000.0
-    MAX_AMOUNT_USD = 500000000.0
-    RANGE_FACTOR_LOW = 0.5
-    RANGE_FACTOR_HIGH = 2.0
-
-    small_amount = max(1, 10 ** (sell_token['decimals']))
-    small_quote = fetch_quote(sell_token['address'], buy_token['address'], small_amount)
-    if not small_quote:
-        return None
-    sell_price = small_quote['sell_token_price_in_usd']
-    if sell_price <= 0:
-        return None
-
-    # Default full range
-    min_amount = math.ceil(MIN_AMOUNT_USD / sell_price * 10 ** sell_token['decimals'])
-    max_amount = math.ceil(MAX_AMOUNT_USD / sell_price * 10 ** sell_token['decimals'])
-
-    # Narrow range using last known depth if available
-    last_data = get_latest_depths(token_symbol)
-    if last_data:
-        last_depth = last_data[1] if is_sell_side else last_data[0]  # sell or buy
-        if last_depth > 0 and sell_price > 0:
-            last_depth_float = float(last_depth)
-            # Convert USD depth to token amount
-            last_amount = last_depth_float / sell_price * 10 ** sell_token['decimals']
-            min_amount = max(min_amount, math.ceil(last_amount * RANGE_FACTOR_LOW))
-            max_amount = min(max_amount, math.ceil(last_amount * RANGE_FACTOR_HIGH))
-
-    for _ in range(MAX_ITERATIONS):
-        amount = (min_amount + max_amount) // 2
-        if amount == 0:
-            return None
-        quote = fetch_quote(sell_token['address'], buy_token['address'], amount)
-        if not quote:
-            return None
-        slippage = compute_slippage(quote, sell_token['decimals'], buy_token['decimals'])
-        diff = abs(slippage - TARGET_SLIPPAGE)
-        if diff < TOLERANCE_FROM_TARGET:
-            return quote['buy_amount'] if is_sell_side else amount
-        if slippage < TARGET_SLIPPAGE:
-            min_amount = amount
-        else:
-            max_amount = amount
-        if max_amount - min_amount <= 10:
-            return quote['buy_amount'] if is_sell_side else amount
-    return None
+# Streamlit app configuration
+st.set_page_config(
+    page_title="Starknet Market Depth Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
 st.title("Starknet ±2% Depth Dashboard via AVNU")
+st.markdown("*All quotes are executed on AVNU against USDC. Data is updated every minute via AWS Lambda.*")
 
-# Add note about USDC quotes
-st.markdown("*All quotes are executed on AVNU against USDC*")
+# Display last update time
+last_update = get_last_update_time()
+if last_update:
+    time_diff = datetime.now() - last_update
+    if time_diff.total_seconds() < 300:  # Less than 5 minutes
+        st.success(f"🟢 Last updated: {last_update.strftime('%Y-%m-%d %H:%M:%S')} ({int(time_diff.total_seconds())} seconds ago)")
+    else:
+        st.warning(f"🟡 Last updated: {last_update.strftime('%Y-%m-%d %H:%M:%S')} ({int(time_diff.total_seconds()/60)} minutes ago)")
+else:
+    st.error("❌ No data available")
 
-with st.spinner("Fetching market depth data..."):
+# Get latest depth data
+latest_depths = get_latest_depths_all()
+
+if latest_depths:
+    # Prepare data for display
     data = []
-    for token in TOKENS:
-        try:
-            last_data = get_latest_depths(token['symbol'])
-            if last_data and (datetime.now() - last_data[2]) < timedelta(minutes=5):
-                # Reuse recent data, no fetch
-                buy_depth = last_data[0]
-                sell_depth = last_data[1]
+    for token, buy_depth, sell_depth, timestamp in latest_depths:
+        data.append({
+            'Token': token,
+            'Buy Depth (USD)': format_currency(float(buy_depth)),
+            'Sell Depth (USD)': format_currency(float(sell_depth)),
+            'Last Updated': timestamp.strftime('%H:%M:%S')
+        })
+    
+    # Display current depths table
+    st.subheader("📊 Current Market Depths")
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    # Get available tokens for historical charts
+    available_tokens = get_available_tokens()
+    
+    if available_tokens:
+        st.subheader("📈 Historical Charts")
+        
+        # Create tabs for better organization
+        if len(available_tokens) > 4:
+            # Use selectbox for many tokens
+            selected_token = st.selectbox("Select token to view history:", available_tokens)
+            tokens_to_display = [selected_token] if selected_token else []
+        else:
+            # Show all tokens if there are few
+            tokens_to_display = available_tokens
+        
+        # Display historical charts
+        for token in tokens_to_display:
+            hist_df = get_historical_depths(token)
+            if hist_df is not None and not hist_df.empty:
+                with st.container():
+                    st.markdown(f"### {token} ±2% Depth History (Last 7 Days)")
+                    
+                    # Prepare data for altair chart
+                    chart_data = hist_df.reset_index().melt(
+                        id_vars=['Timestamp'],
+                        value_vars=['Buy Depth (USD)', 'Sell Depth (USD)'],
+                        var_name='Depth Type',
+                        value_name='Value'
+                    )
+                    
+                    # Create altair chart with proper formatting
+                    chart = alt.Chart(chart_data).mark_line(strokeWidth=2).add_selection(
+                        alt.selection_interval()
+                    ).encode(
+                        x=alt.X('Timestamp:T', title='Time'),
+                        y=alt.Y('Value:Q',
+                               title='Depth (USD)',
+                               axis=alt.Axis(
+                                   format='$.2s',
+                                   labelExpr="datum.value >= 1000000 ? '$' + format(datum.value/1000000, '.1f') + 'M' : datum.value >= 1000 ? '$' + format(datum.value/1000, '.0f') + 'K' : '$' + format(datum.value, '.0f')"
+                               )),
+                        color=alt.Color('Depth Type:N',
+                                       scale=alt.Scale(
+                                           domain=['Buy Depth (USD)', 'Sell Depth (USD)'],
+                                           range=['#00ff00', '#ff0000']
+                                       ),
+                                       legend=alt.Legend(title="Depth Type"))
+                    ).properties(
+                        height=400,
+                        width='container'
+                    ).resolve_scale(
+                        y='independent'
+                    )
+                    
+                    st.altair_chart(chart, use_container_width=True)
             else:
-                # Compute new
-                buy_depth_raw = find_depth_amount(USD_TOKEN, token, False, token['symbol'])
-                buy_depth = buy_depth_raw / 10 ** USD_TOKEN['decimals'] if buy_depth_raw else 0.0
-                sell_depth_raw = find_depth_amount(token, USD_TOKEN, True, token['symbol'])
-                sell_depth = sell_depth_raw / 10 ** USD_TOKEN['decimals'] if sell_depth_raw else 0.0
-                print(f"Token: {token['symbol']}, Buy depth: {buy_depth}, Sell depth: {sell_depth}")
-                
-                # Only insert if both depths are greater than 0
-                if buy_depth > 0 and sell_depth > 0:
-                    insert_depths(token['symbol'], buy_depth, sell_depth)
+                st.info(f"No historical data available for {token}")
+    
+else:
+    st.warning("No current depth data available. The Lambda function may not have run yet or there might be an issue with data collection.")
 
-            # Only add to data if both depths are greater than 0
-            if buy_depth > 0 and sell_depth > 0:
-                data.append({
-                    'Token': token['symbol'],
-                    'Buy Depth (USD)': format_currency(buy_depth),
-                    'Sell Depth (USD)': format_currency(sell_depth),
-                })
-        except Exception as e:
-            st.error(f"Error for {token['symbol']}: {e}")
-            print(f"Error for {token['symbol']}: {e}")
-
-    # Display table at the top with title
-    if data:
-        st.subheader("Latest Depths")
-        df = pd.DataFrame(data)
-        st.dataframe(df, use_container_width=True)
-
-    # Display historical charts
-    for token in TOKENS:
-        hist_df = get_historical_depths(token['symbol'])
-        if hist_df is not None and not hist_df.empty:
-            st.subheader(f"{token['symbol']} ±2% Depth History (Last 7 Days)")
-            
-            # Prepare data for altair chart
-            chart_data = hist_df.reset_index().melt(
-                id_vars=['Timestamp'],
-                value_vars=['Buy Depth (USD)', 'Sell Depth (USD)'],
-                var_name='Depth Type',
-                value_name='Value'
-            )
-            
-            # Create altair chart with proper formatting
-            chart = alt.Chart(chart_data).mark_line(strokeWidth=2).add_selection(
-                alt.selection_interval()
-            ).encode(
-                x=alt.X('Timestamp:T', title='Time'),
-                y=alt.Y('Value:Q',
-                       title='Depth (USD)',
-                       axis=alt.Axis(
-                           format='$.2s',  # Format as currency with SI prefix (1.1M, 500K, etc.)
-                           labelExpr="datum.value >= 1000000 ? '$' + format(datum.value/1000000, '.1f') + 'M' : datum.value >= 1000 ? '$' + format(datum.value/1000, '.0f') + 'K' : '$' + format(datum.value, '.0f')"
-                       )),
-                color=alt.Color('Depth Type:N',
-                               scale=alt.Scale(
-                                   domain=['Buy Depth (USD)', 'Sell Depth (USD)'],
-                                   range=['#00ff00', '#ff0000']  # Green for buy, red for sell
-                               ),
-                               legend=alt.Legend(title="Depth Type"))
-            ).properties(
-                height=300,  # Reduced height
-                width='container'
-            ).resolve_scale(
-                y='independent'
-            )
-            
-            st.altair_chart(chart, use_container_width=True)
-
-time.sleep(60)
+# Auto-refresh the page every 60 seconds
 st.rerun()
